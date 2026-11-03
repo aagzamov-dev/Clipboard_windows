@@ -1,0 +1,75 @@
+<Window x:Class="Clipboard.Windows.HistoryWindow"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Title="Clipboard" Width="540" Height="594" WindowStyle="None" ResizeMode="CanResizeWithGrip"
+ MinWidth="360" MinHeight="320" ShowInTaskbar="False" Topmost="True"
+ Background="{DynamicResource Surface}" Foreground="{DynamicResource Ink}"
+ Icon="Assets/Clipboard.ico" Deactivated="OnDeactivated" PreviewKeyDown="OnKeyDown" IsVisibleChanged="OnVisibilityChanged">
+ <Border BorderBrush="{DynamicResource Line}" BorderThickness="1" CornerRadius="10" Padding="12">
+  <Grid>
+   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+   <DockPanel Margin="0,0,0,10" MouseLeftButtonDown="OnHeaderDrag">
+    <Button DockPanel.Dock="Right" Content="⚙" Click="OnSettings" ToolTip="Settings  Ctrl+," AutomationProperties.Name="Settings"/>
+    <Button x:Name="RecordingButton" DockPanel.Dock="Right" Content="Pause" Click="OnRecording" Margin="0,0,8,0"/>
+    <StackPanel VerticalAlignment="Center"><TextBlock Text="Clipboard" FontWeight="SemiBold" FontSize="14"/><TextBlock x:Name="RecordingStatus" FontSize="11" Opacity="0.7"/></StackPanel>
+   </DockPanel>
+   <TextBox x:Name="Search" Grid.Row="1" TextChanged="OnSearch" MaxLength="1024" ToolTip="Search clipboard history  Ctrl+F" AutomationProperties.Name="Search clipboard history"/>
+   <DockPanel Grid.Row="2" Margin="0,8">
+    <Button x:Name="RefreshButton" DockPanel.Dock="Left" Content="Refresh" Visibility="Collapsed" Click="OnRefresh" Margin="0,0,8,0"/>
+    <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
+     <CheckBox x:Name="PinnedFilter" Content="Pinned" VerticalAlignment="Center" Margin="0,0,8,0" Click="OnFilter"/>
+     <ComboBox x:Name="Types" Width="80" SelectedIndex="0" SelectionChanged="OnFilter" AutomationProperties.Name="Content type"><ComboBoxItem Content="All types"/><ComboBoxItem Content="Text"/><ComboBoxItem Content="Link"/><ComboBoxItem Content="Code"/><ComboBoxItem Content="Image"/><ComboBoxItem Content="Files"/></ComboBox>
+     <Button Content="‹" Click="OnPreviousDay" Margin="8,0,0,0" ToolTip="Previous day" AutomationProperties.Name="Previous day"/>
+     <ComboBox x:Name="Dates" Width="94" SelectedIndex="0" SelectionChanged="OnDateFilter" AutomationProperties.Name="Date range"><ComboBoxItem Content="Today"/><ComboBoxItem Content="Yesterday"/><ComboBoxItem Content="7 days"/><ComboBoxItem Content="All history"/><ComboBoxItem x:Name="SelectedDay" Content="Selected day"/></ComboBox>
+     <Button x:Name="NextDay" Content="›" Click="OnNextDay" ToolTip="Next day" AutomationProperties.Name="Next day"/>
+    </WrapPanel>
+   </DockPanel>
+   <DockPanel Grid.Row="3" Margin="0,0,0,6">
+    <Button x:Name="UndoButton" DockPanel.Dock="Right" Content="Undo delete" Visibility="Collapsed" Click="OnUndo"/>
+    <TextBlock x:Name="Notice" TextWrapping="Wrap" FontSize="12" Opacity="0.8" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>
+   </DockPanel>
+   <Grid Grid.Row="4">
+    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition x:Name="PreviewColumn" Width="0"/></Grid.ColumnDefinitions>
+    <Grid>
+     <ListBox x:Name="HistoryList" SelectionMode="Extended" SelectionChanged="OnSelection" PreviewMouseLeftButtonUp="OnRowClick" PreviewTextInput="OnListTyping"
+       ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+       AutomationProperties.Name="Clipboard history" Background="{DynamicResource Surface}" Foreground="{DynamicResource Ink}" BorderThickness="0">
+      <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="8,7"/></Style></ListBox.ItemContainerStyle>
+      <ListBox.ItemTemplate><DataTemplate>
+       <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <StackPanel><TextBlock Text="{Binding Preview}" TextTrimming="CharacterEllipsis" MaxHeight="36" TextWrapping="Wrap"/><StackPanel Orientation="Horizontal" Margin="0,4,0,0"><TextBlock Text="{Binding KindLabel}" FontSize="11" Opacity="0.65"/><TextBlock Text="{Binding Source}" FontSize="11" Opacity="0.65" Margin="8,0,0,0"/></StackPanel></StackPanel>
+        <Button Grid.Column="1" Content="↗" Tag="{Binding Id}" Click="OnPreviewRow" ToolTip="Preview and edit" AutomationProperties.Name="Preview entry" Margin="6,0,0,0" Padding="8,4"/>
+        <Button Grid.Column="2" Content="⧉" Tag="{Binding Id}" Click="OnCopyRow" ToolTip="Copy" AutomationProperties.Name="Copy entry" Margin="4,0,0,0" Padding="8,4"/>
+       </Grid>
+      </DataTemplate></ListBox.ItemTemplate>
+     </ListBox>
+     <StackPanel x:Name="EmptyState" VerticalAlignment="Center" HorizontalAlignment="Center" MaxWidth="320">
+      <TextBlock x:Name="EmptyTitle" Text="Nothing copied yet" FontSize="18" FontWeight="SemiBold" TextAlignment="Center"/>
+      <TextBlock x:Name="EmptyDescription" Text="Copy text, images, or files to find them here." TextWrapping="Wrap" TextAlignment="Center" Opacity="0.7" Margin="0,10"/>
+      <Button x:Name="StartButton" Content="Start local history" Click="OnRecording" HorizontalAlignment="Center"/>
+     </StackPanel>
+    </Grid>
+    <Grid x:Name="PreviewPanel" Grid.Column="1" Margin="12,0,0,0" Visibility="Collapsed">
+     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+     <DockPanel><Button DockPanel.Dock="Right" Content="×" Click="OnClosePreview" AutomationProperties.Name="Close preview"/><TextBlock x:Name="PreviewTitle" Text="Preview" FontWeight="SemiBold" VerticalAlignment="Center"/></DockPanel>
+     <TextBlock x:Name="PreviewMetadata" Grid.Row="1" TextWrapping="Wrap" FontSize="11" Opacity="0.65" Margin="0,8"/>
+     <Grid Grid.Row="2">
+      <TextBox x:Name="Editor" AcceptsReturn="True" AcceptsTab="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" TextChanged="OnEditorChanged" FontFamily="Consolas" FontSize="13" AutomationProperties.Name="Editable clipboard text"/>
+      <Image x:Name="ImagePreview" Stretch="Uniform" Visibility="Collapsed" AutomationProperties.Name="Clipboard image preview"/>
+      <TextBox x:Name="FilePreview" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Visibility="Collapsed" AutomationProperties.Name="File references"/>
+     </Grid>
+     <DockPanel Grid.Row="3" Margin="0,8,0,0">
+      <ComboBox x:Name="TextActions" Width="138" SelectionChanged="OnTextAction" SelectedIndex="0"><ComboBoxItem Content="Text actions"/><ComboBoxItem Content="Trim whitespace"/><ComboBoxItem Content="Remove blank lines"/><ComboBoxItem Content="UPPERCASE"/><ComboBoxItem Content="lowercase"/><ComboBoxItem Content="Title Case"/></ComboBox>
+      <Button x:Name="SaveButton" Content="Save" Click="OnSaveDraft" Margin="8,0,0,0" ToolTip="Save draft  Ctrl+S"/>
+      <Button Content="Revert" Click="OnRevert" Margin="8,0,0,0"/>
+     </DockPanel>
+     <WrapPanel Grid.Row="4" Margin="0,8,0,0"><Button Content="Copy" Click="OnCopy"/><Button Content="Paste" Click="OnPaste" Margin="6,0,0,0"/><Button Content="Plain text" Click="OnPastePlain" Margin="6,0,0,0"/></WrapPanel>
+    </Grid>
+   </Grid>
+   <DockPanel Grid.Row="5" Margin="0,10,0,0">
+    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal"><Button Content="Pin" Click="OnPin" ToolTip="Pin/unpin  Ctrl+P"/><Button Content="Delete" Click="OnDelete" Margin="6,0"/><Button x:Name="PreviousPage" Content="‹" Click="OnPreviousPage" AutomationProperties.Name="Previous page"/><Button x:Name="NextPage" Content="›" Click="OnNextPage" AutomationProperties.Name="Next page"/></StackPanel>
+    <TextBlock x:Name="ShortcutLabel" FontSize="11" Opacity="0.65" VerticalAlignment="Center" TextWrapping="Wrap"/>
+   </DockPanel>
+  </Grid>
+ </Border>
+</Window>

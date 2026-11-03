@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+.build/
+.vs/
+*.user
+*.suo
+.DS_Store
+*.pfx
+.env
+.env.*

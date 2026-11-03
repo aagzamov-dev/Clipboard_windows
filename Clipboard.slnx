@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Clipboard.Core/Clipboard.Core.csproj" />
+    <Project Path="src/Clipboard.Windows/Clipboard.Windows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Clipboard.Core.Tests/Clipboard.Core.Tests.csproj" />
+  </Folder>
+</Solution>
