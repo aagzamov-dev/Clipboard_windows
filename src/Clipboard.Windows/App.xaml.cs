@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -29,6 +30,7 @@ public partial class App : Application
     private Forms.ContextMenuStrip? trayMenu;
     private Forms.ToolStripMenuItem? pauseItem;
     private HistoryWindow? popup;
+    private PopupSize? constrainedPopupSize;
     private SettingsWindow? settingsWindow;
     private readonly DispatcherTimer maintenance = new() { Interval = TimeSpan.FromSeconds(30) };
     private readonly Channel<ClipboardItem> captures = Channel.CreateBounded<ClipboardItem>(new BoundedChannelOptions(4) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
@@ -42,6 +44,7 @@ public partial class App : Application
     internal PasteCoordinator Paste { get; private set; } = null!;
     internal bool Recording => Settings.OnboardingComplete && Settings.StartMonitoring && !sessionLocked && !manualPause && pauseUntil <= DateTimeOffset.UtcNow;
     internal string LastStatus { get; private set; } = "";
+    internal bool DarkTheme { get; private set; }
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -68,7 +71,7 @@ public partial class App : Application
             popup = new HistoryWindow(); MainWindow = popup;
             nint handle = new WindowInteropHelper(popup).EnsureHandle();
             shortcut = new GlobalShortcut(handle, () => { if (settingsWindow?.IsActive != true) TogglePopup(); });
-            using (var icon = GetResourceStream(new Uri("pack://application:,,,/Assets/Clipboard.ico")).Stream) trayIcon = new System.Drawing.Icon(icon);
+            using (var icon = GetResourceStream(new Uri("pack://application:,,,/Clipboard;component/Assets/Clipboard.ico")).Stream) trayIcon = new System.Drawing.Icon(icon);
             BuildTray();
             try { shortcut.Apply(Settings.Shortcut, () => { }); }
             catch (Win32Exception error) { warning = string.Join("\n\n", warning, error.Message); }
@@ -117,6 +120,10 @@ public partial class App : Application
     }
 
     internal void TogglePopup() => TogglePopupCore(false);
+    internal void RememberPasteDestination(nint previous)
+    {
+        Paste?.Remember(ForegroundTracker.IsDestination(previous) ? previous : 0);
+    }
     private void OpenFromTray() => TogglePopupCore(true);
     private void TogglePopupCore(bool trayInvocation)
     {
@@ -133,20 +140,34 @@ public partial class App : Application
         catch (Exception error) { Report(error.Message); }
     }
 
-    internal void ResizePopup(double width, double height)
+    internal PopupSize? ResizePopup()
     {
-        if (popup is null) return;
-        var size = layouts.Get(PopupPlacement.MonitorKey(), popup.PreviewVisible);
-        PositionPopup(size.Width, size.Height);
+        if (popup is null) return null;
+        var size = layouts.Get(PopupPlacement.MonitorKey(new WindowInteropHelper(popup).Handle), popup.PreviewVisible);
+        return PositionPopup(size.Width, size.Height, preservePosition: true);
     }
 
-    private void PositionPopup(double width, double height)
+    private PopupSize? PositionPopup(double width, double height, bool preservePosition = false)
     {
-        if (popup is null) return;
-        double minWidth = popup.MinWidth, minHeight = popup.MinHeight;
+        if (popup is null) return null;
+        var requested = popup.SizeForMode(new PopupSize(width, height));
+        width = requested.Width; height = requested.Height;
+        double minWidth = 340, minHeight = popup.PreviewVisible ? 440 : 380;
+        width = Math.Max(width, minWidth); height = Math.Max(height, minHeight);
+        PopupSize? placed = null;
         popup.MinWidth = popup.MinHeight = 0;
-        try { PopupPlacement.Position(new WindowInteropHelper(popup).Handle, width, height); }
-        finally { popup.MinWidth = Math.Min(minWidth, width); popup.MinHeight = Math.Min(minHeight, height); }
+        try
+        {
+            nint handle = new WindowInteropHelper(popup).Handle;
+            placed = preservePosition ? PopupPlacement.Resize(handle, width, height) : PopupPlacement.Position(handle, width, height);
+            constrainedPopupSize = Math.Abs(placed.Width - width) > 1 || Math.Abs(placed.Height - height) > 1 ? placed : null;
+        }
+        finally
+        {
+            popup.MinWidth = Math.Min(minWidth, placed?.Width ?? popup.ActualWidth);
+            popup.MinHeight = Math.Min(minHeight, placed?.Height ?? popup.ActualHeight);
+        }
+        return placed;
     }
 
     internal void RememberPopupSize()
@@ -154,14 +175,18 @@ public partial class App : Application
         if (popup is null || popup.ActualWidth <= 1 || popup.ActualHeight <= 1) return;
         string key = PopupPlacement.MonitorKey(new WindowInteropHelper(popup).Handle);
         var size = new PopupSize(popup.ActualWidth, popup.ActualHeight);
-        layoutSave = Guard(() => layouts.Remember(key, popup.PreviewVisible, size));
+        Task nextSave = Guard(() => layouts.Remember(key, popup.PreviewVisible, size, constrainedPopupSize));
+        // A skipped constrained-size save must not hide an earlier write from shutdown.
+        if (!nextSave.IsCompleted) layoutSave = nextSave;
     }
 
-    internal void ShowSettings()
+    internal void ShowSettings() => ShowSettings(false);
+    internal void ShowSettings(bool history)
     {
         Paste?.Cancel(); popup?.Dismiss();
         if (settingsWindow is null) { settingsWindow = new SettingsWindow(this); settingsWindow.Closed += (_, _) => settingsWindow = null; }
         settingsWindow.Show(); settingsWindow.Activate();
+        if (history) settingsWindow.ShowHistory();
     }
 
     internal async Task SaveSettings(AppSettings next)
@@ -252,6 +277,7 @@ public partial class App : Application
 
     internal Task<bool> ResolveDrafts(bool all) => popup?.ResolveClear(all) ?? Task.FromResult(true);
     internal void HistoryCleared() => popup?.DiscardDrafts();
+    internal IReadOnlyCollection<Guid> ProtectedDraftIds => popup?.DraftIds ?? [];
 
     internal async Task<string> CheckUpdates(bool interactive)
     {
@@ -288,13 +314,33 @@ public partial class App : Application
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
             dark = key?.GetValue("AppsUseLightTheme") is int value && value == 0;
         }
-        Resources["Surface"] = SystemParameters.HighContrast ? SystemColors.WindowBrush : new SolidColorBrush(dark ? Color.FromRgb(30, 30, 32) : Color.FromRgb(250, 250, 252));
-        Resources["Ink"] = SystemParameters.HighContrast ? SystemColors.WindowTextBrush : new SolidColorBrush(dark ? Color.FromRgb(240, 240, 242) : Color.FromRgb(30, 30, 32));
+        DarkTheme = dark;
+        void ColorResource(string name, string darkColor, string lightColor, Brush highContrast)
+        {
+            var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(dark ? darkColor : lightColor));
+            brush.Freeze(); Resources[name] = SystemParameters.HighContrast ? highContrast : brush;
+        }
+        ColorResource("Surface", "#202024", "#F3F3F6", SystemColors.WindowBrush);
+        ColorResource("Ink", "#F5F5F7", "#1B1B20", SystemColors.WindowTextBrush);
+        ColorResource("SecondaryInk", "#B8B8C3", "#595963", SystemColors.WindowTextBrush);
+        ColorResource("Line", "#38FFFFFF", "#22000000", SystemColors.ActiveBorderBrush);
+        ColorResource("InputSurface", "#343439", "#FCFCFE", SystemColors.WindowBrush);
+        ColorResource("CardSurface", "#70343439", "#B8FFFFFF", SystemColors.WindowBrush);
+        ColorResource("HoverSurface", "#48484F", "#E9E9F1", SystemColors.ControlBrush);
+        ColorResource("SelectionSurface", "#384959", "#DCECFB", SystemColors.HighlightBrush);
+        ColorResource("SelectedInk", "#F5F5F7", "#1B1B20", SystemColors.HighlightTextBrush);
+        ColorResource("SelectedTabInk", "#80CAFF", "#0067C0", SystemColors.HighlightTextBrush);
+        ColorResource("Accent", "#80CAFF", "#0067C0", SystemColors.HighlightBrush);
+        ColorResource("AccentInk", "#092338", "#FFFFFF", SystemColors.HighlightTextBrush);
+        ColorResource("DropSurface", "#2D2D33", "#FAFAFD", SystemColors.WindowBrush);
+        ColorResource("ScrollThumb", "#85858F", "#85858F", SystemColors.WindowTextBrush);
+        ColorResource("AcrylicTint", "#20202024", "#40F8F8FC", SystemColors.WindowBrush);
+        Resources["WindowTint"] = Resources["Surface"];
         Resources[SystemColors.WindowBrushKey] = Resources["Surface"];
         Resources[SystemColors.WindowTextBrushKey] = Resources["Ink"];
         Resources[SystemColors.ControlTextBrushKey] = Resources["Ink"];
         Resources[SystemColors.ControlBrushKey] = Resources["Surface"];
-        Resources["Line"] = SystemParameters.HighContrast ? SystemColors.ActiveBorderBrush : new SolidColorBrush(dark ? Color.FromRgb(65, 65, 69) : Color.FromRgb(212, 212, 218));
+        foreach (Window window in Windows) WindowBackdrop.Apply(window);
     }
 
     protected override void OnExit(ExitEventArgs e)

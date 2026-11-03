@@ -27,12 +27,15 @@ public sealed class WindowLayouts
 
     public PopupSize Get(string monitor, bool preview)
     {
-        lock (sizes) return sizes.GetValueOrDefault(monitor + (preview ? ":preview" : ":list"), new(preview ? 972 : 540, 594));
+        lock (sizes) return sizes.GetValueOrDefault(monitor + (preview ? ":preview" : ":list"), new(preview ? 840 : 440, 520));
     }
 
-    public Task Remember(string monitor, bool preview, PopupSize size)
+    public Task Remember(string monitor, bool preview, PopupSize size, PopupSize? automaticallyConstrainedSize = null)
     {
         if (!Valid(size) || monitor.Length > 100) return Task.CompletedTask;
+        // A screen-edge fit is temporary, not a new user preference.
+        if (automaticallyConstrainedSize is { } constrained &&
+            Math.Abs(size.Width - constrained.Width) <= 1 && Math.Abs(size.Height - constrained.Height) <= 1) return Task.CompletedTask;
         lock (sizes)
         {
             sizes[monitor + (preview ? ":preview" : ":list")] = size;

@@ -11,7 +11,7 @@ try
 {
     var settingsPath = Path.Combine(directory, "settings.json"); var settingsStore = new SettingsStore(settingsPath);
     var defaults = settingsStore.Load();
-    Check(defaults.Shortcut.ToString() == "Ctrl+Alt+V" && !defaults.ActiveDisplay && !defaults.OnboardingComplete && defaults.RetentionDays == 30, "Private, mouse-positioned defaults");
+    Check(defaults.Shortcut.ToString() == "Ctrl+Alt+V" && !defaults.ActiveDisplay && !defaults.OnboardingComplete && defaults.RetentionDays is null && defaults.MaximumCount is null, "Private, mouse-positioned defaults keep unlimited history");
     Check(!File.Exists(settingsPath), "Default load never writes preferences");
     var custom = defaults with { Shortcut = new(ShortcutModifiers.Control | ShortcutModifiers.Shift, 0x70), ExcludedApps = ["KeePass.exe"], Appearance = "Dark" };
     settingsStore.Save(custom);
@@ -82,15 +82,43 @@ try
                     throw new Exception("Popup escaped working area");
             }
     Check(true, "Mouse placement fits negative origins, corners, taskbars and 100–300% DPI");
+    foreach (var work in new[] { new PixelRect(-1920, 0, 1920, 1040), new PixelRect(0, -1440, 2560, 1400), new PixelRect(0, 0, 800, 560) })
+        foreach (double scale in new[] { 1.0, 1.5, 2.0, 3.0 })
+        {
+            int w = Math.Min((int)Math.Round(440 * scale), work.Width - 24), h = Math.Min((int)Math.Round(520 * scale), work.Height - 24);
+            foreach (var current in new[] { new PixelRect(work.Left + 12, work.Top + 12, w, h), new PixelRect(work.Left + work.Width - 12 - w, work.Top + work.Height - 12 - h, w, h) })
+            {
+                var expanded = PopupGeometry.Resize(work, current, scale, 840, 520);
+                var closed = PopupGeometry.Resize(work, expanded, scale, 440, 520);
+                if (expanded.Left != current.Left || expanded.Top != current.Top || closed.Left != current.Left || closed.Top != current.Top ||
+                    expanded.Left + expanded.Width > work.Left + work.Width || expanded.Top + expanded.Height > work.Top + work.Height)
+                    throw new Exception("Detail resize moved its anchor or escaped the working area");
+            }
+        }
+    Check(true, "Opening and closing details preserves the anchor at monitor corners and 100–300% DPI");
+    Check(PopupGeometry.Resize(new(0, 0, 1920, 1040), new(1480, 660, 440, 380), 1, 840, 520) == new PixelRect(1480, 660, 440, 380), "Details near right and bottom edges use the available space without shifting");
+    var repaired = PopupGeometry.Resize(new(0, 0, 800, 560), new(2000, 2000, 440, 520), 1, 840, 520);
+    Check(repaired.Left >= 0 && repaired.Top >= 0 && repaired.Left + repaired.Width <= 800 && repaired.Top + repaired.Height <= 560 && repaired.Width >= 440, "An already off-screen resize is repaired without collapsing the popup");
+    Throws<ArgumentOutOfRangeException>(() => PopupGeometry.Resize(new(0, 0, 800, 560), new(10, 10, 440, 520), double.NaN, 840, 520));
 
     string layoutsPath = Path.Combine(directory, "layouts.json");
     var layouts = new WindowLayouts(layoutsPath);
     await layouts.Remember("DISPLAY1", false, new(620, 700)); await layouts.Remember("DISPLAY2", true, new(1100, 760));
     var reopenedLayouts = new WindowLayouts(layoutsPath);
     Check(reopenedLayouts.Get("DISPLAY1", false) == new PopupSize(620, 700) && reopenedLayouts.Get("DISPLAY2", true) == new PopupSize(1100, 760), "Per-monitor list and preview sizes persist independently");
+    await layouts.Remember("EDGE", true, new(840, 520));
+    var edgeBounds = PopupGeometry.Resize(new(0, 0, 1920, 1040), new(1480, 660, 440, 380), 1, 840, 520);
+    var constrained = new PopupSize(edgeBounds.Width, edgeBounds.Height);
+    await layouts.Remember("EDGE", true, constrained, constrained);
+    var centered = layouts.Get("EDGE", true);
+    Check(centered == new PopupSize(840, 520) && PopupGeometry.Resize(new(0, 0, 1920, 1040), new(100, 80, 440, 520), 1, centered.Width, centered.Height).Width == 840, "Edge-constrained preview close preserves the preferred size for reopening at the center");
+    var afterEdgeDismiss = new WindowLayouts(layoutsPath);
+    Check(afterEdgeDismiss.Get("EDGE", true) == new PopupSize(840, 520), "Dismissing an edge-constrained preview does not persist its temporary fit");
+    await layouts.Remember("EDGE", true, new(700, 480), constrained);
+    Check(new WindowLayouts(layoutsPath).Get("EDGE", true) == new PopupSize(700, 480), "An intentional resize replaces the preferred size after an automatic constraint");
     await layouts.Remember("DISPLAY1", false, new(double.NaN, 700));
     Check(layouts.Get("DISPLAY1", false).Width == 620, "Invalid layout cannot replace valid dimensions");
-    File.WriteAllText(layoutsPath, "{broken"); Check(new WindowLayouts(layoutsPath).Get("missing", false).Width == 540, "Malformed layout safely falls back");
+    File.WriteAllText(layoutsPath, "{broken"); Check(new WindowLayouts(layoutsPath).Get("missing", false) == new PopupSize(440, 520), "Malformed layout safely falls back to compact size");
 
     await ThrowsAsync<InvalidDataException>(() => BackupService.Export(store, store.Path, ""));
     string backup = Path.Combine(directory, "encrypted.clipboard"); await BackupService.Export(store, backup, "correct horse battery");
@@ -144,10 +172,46 @@ try
     var protectedOld = ClipboardItem.FromText("old unsaved draft") with { Created = DateTimeOffset.UtcNow.AddDays(-60) };
     await store.Capture(old); await store.Capture(protectedOld);
     await store.Cleanup(defaults, [protectedOld.Id]);
+    Check((await store.Get(old.Id)).Text == old.Text, "Default maintenance keeps old active history");
+    await store.Cleanup(defaults with { RetentionDays = 1, MaximumCount = 1 }, [protectedOld.Id]);
+    Check((await store.Get(old.Id)).Text == old.Text, "Legacy age and count settings cannot expire active history");
+    await store.ClearOlderThan(DateTimeOffset.UtcNow.AddDays(-30), [protectedOld.Id]);
     await ThrowsAsync<InvalidDataException>(() => store.Get(old.Id));
-    Check((await store.Get(protectedOld.Id)).Text == protectedOld.Text && (await store.Get(first.Id)).Pinned, "Retention protects pinned entries and unsaved drafts");
+    Check((await store.Get(protectedOld.Id)).Text == protectedOld.Text && (await store.Get(first.Id)).Pinned, "Manual age cleanup protects pinned entries and unsaved drafts");
     await store.Clear(false); Check((await store.Query(new())).Single().Id == first.Id, "Clear unpinned preserves pins");
     await store.Clear(true); Check((await store.Query(new())).Count == 0, "Explicit clear all");
+
+    foreach (int days in new[] { 7, 30 })
+    {
+        using var ageStore = new HistoryStore(Path.Combine(directory, $"age-{days}.db"));
+        var ageCutoff = DateTimeOffset.FromUnixTimeMilliseconds(DateTimeOffset.UtcNow.AddDays(-days).ToUnixTimeMilliseconds());
+        var older = ClipboardItem.FromText("older") with { Created = ageCutoff.AddMilliseconds(-1) };
+        var boundary = ClipboardItem.FromText("boundary") with { Created = ageCutoff };
+        var recent = ClipboardItem.FromText("recent") with { Created = ageCutoff.AddDays(1) };
+        var pin = ClipboardItem.FromText("pinned old") with { Created = ageCutoff.AddDays(-1), Pinned = true };
+        var draft = ClipboardItem.FromText("draft old") with { Created = ageCutoff.AddDays(-1) };
+        var combined = ClipboardItem.FromText("combined original") with { Created = ageCutoff.AddDays(-1) };
+        foreach (var value in new[] { older, boundary, recent, pin, draft, combined }) await ageStore.Capture(value);
+        var ageDrafts = new DraftStore(); ageDrafts.SetIndividual(draft.Id, draft.Text!, "unsaved");
+        ageDrafts.SetCombined("selection", "original", "combined edit", [combined.Id]);
+        Check(await ageStore.ClearOlderThan(ageCutoff, ageDrafts.ProtectedIds) == 1, $"{days}-day cleanup removes only strictly older eligible entries");
+        var survivors = (await ageStore.Query(new())).Select(row => row.Id).ToHashSet();
+        Check(survivors.SetEquals(new[] { boundary.Id, recent.Id, pin.Id, draft.Id, combined.Id }), $"{days}-day cleanup keeps boundary, recent, pinned, individual and combined drafts");
+        Check(await ageStore.ClearOlderThan(ageCutoff, ageDrafts.ProtectedIds) == 0, $"{days}-day cleanup is idempotent");
+        var duplicateProbe = ClipboardItem.FromText("dedup after no-op cleanup");
+        await ageStore.Capture(duplicateProbe);
+        await ageStore.ClearOlderThan(ageCutoff, ageDrafts.ProtectedIds);
+        Check(!await ageStore.Capture(ClipboardItem.FromText(duplicateProbe.Text!)), $"{days}-day no-op cleanup preserves consecutive duplicate suppression");
+    }
+    using (var allOld = new HistoryStore(Path.Combine(directory, "all-old.db")))
+    {
+        var tied = DateTimeOffset.UtcNow.AddDays(-90);
+        var older = ClipboardItem.FromText("oldest") with { Created = tied.AddDays(-1) };
+        var firstTie = ClipboardItem.FromText("same time first") with { Created = tied };
+        var latest = ClipboardItem.FromText("same time latest") with { Created = tied };
+        foreach (var value in new[] { older, firstTie, latest }) await allOld.Capture(value);
+        Check(await allOld.ClearOlderThan(DateTimeOffset.UtcNow.AddDays(-7)) == 2 && (await allOld.Query(new())).Single().Id == latest.Id, "Age cleanup preserves newest entry even when every copy is old, including timestamp ties");
+    }
 
     using var paged = new HistoryStore(Path.Combine(directory, "paged.db"));
     var watch = Stopwatch.StartNew();

@@ -33,7 +33,7 @@ internal sealed class ForegroundTracker : IDisposable
         previous = window; NativeMethods.GetWindowThreadProcessId(window, out previousProcess);
     }
 
-    private static bool IsDestination(nint window)
+    internal static bool IsDestination(nint window)
     {
         if (window == 0 || !NativeMethods.IsWindow(window)) return false;
         NativeMethods.GetWindowThreadProcessId(window, out uint pid);

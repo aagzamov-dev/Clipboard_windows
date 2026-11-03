@@ -1,7 +1,6 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -23,6 +22,7 @@ public partial class SettingsWindow : Window
     internal SettingsWindow(App app)
     {
         InitializeComponent(); this.app = app; draftShortcut = app.Settings.Shortcut; Populate(app.Settings);
+        Native.WindowBackdrop.Attach(this);
         VersionLabel.Text = $"Clipboard {Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)} · Windows 11";
         UpdateStatus.Text = UpdateService.Configured ? "Updates use the configured Windows release repository." : "A Windows release repository has not been configured for this build.";
     }
@@ -32,9 +32,8 @@ public partial class SettingsWindow : Window
         draftShortcut = value.Shortcut; ShortcutInput.Text = draftShortcut.ToString();
         Animation.IsChecked = value.OpenAnimation; LaunchAtLogin.IsChecked = value.StartAtLogin;
         Appearance.SelectedIndex = value.Appearance == "Dark" ? 2 : value.Appearance == "Light" ? 1 : 0;
-        StartMonitoring.IsChecked = value.StartMonitoring; Retention.Text = value.RetentionDays?.ToString(CultureInfo.InvariantCulture) ?? "";
-        MaximumCount.Text = value.MaximumCount?.ToString(CultureInfo.InvariantCulture) ?? "";
-        WeeklyCleanup.IsChecked = value.WeeklyCleanup; PinnedFirst.IsChecked = value.PinnedFirst;
+        StartMonitoring.IsChecked = value.StartMonitoring;
+        PinnedFirst.IsChecked = value.PinnedFirst;
         Separator.Text = value.MergeSeparator; ExcludedApps.Text = string.Join(Environment.NewLine, value.ExcludedApps);
         UpdateChecks.IsChecked = value.CheckForUpdates;
     }
@@ -67,9 +66,8 @@ public partial class SettingsWindow : Window
                 StartAtLogin = LaunchAtLogin.IsChecked == true,
                 Appearance = ((ComboBoxItem)Appearance.SelectedItem).Content.ToString()!,
                 StartMonitoring = StartMonitoring.IsChecked == true,
-                RetentionDays = OptionalNumber(Retention.Text),
-                MaximumCount = OptionalNumber(MaximumCount.Text),
-                WeeklyCleanup = WeeklyCleanup.IsChecked == true,
+                RetentionDays = null,
+                MaximumCount = null,
                 PinnedFirst = PinnedFirst.IsChecked == true,
                 MergeSeparator = Separator.Text,
                 ExcludedApps = ExcludedApps.Text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
@@ -80,17 +78,14 @@ public partial class SettingsWindow : Window
         catch (Exception error) { Status.Text = error.Message; }
         finally { IsBusy = false; SaveButton.IsEnabled = true; }
     }
-    private static int? OptionalNumber(string text) => string.IsNullOrWhiteSpace(text) ? null :
-        int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out int value) ? value : throw new InvalidDataException("Enter a positive whole number or leave the field blank.");
-
     private async Task Work(Func<Task> action)
     {
         if (IsBusy) return;
-        IsBusy = true; ExportButton.IsEnabled = ImportButton.IsEnabled = SaveButton.IsEnabled = false; Status.Text = "Working…";
+        IsBusy = true; ExportButton.IsEnabled = ImportButton.IsEnabled = SaveButton.IsEnabled = ClearHistoryButton.IsEnabled = false; Status.Text = "Working…";
         try { await action(); }
         catch (System.Security.Cryptography.CryptographicException) { Status.Text = "The backup password is wrong or the encrypted backup is damaged. Nothing was imported."; }
         catch (Exception error) { Status.Text = error.Message; }
-        finally { IsBusy = false; ExportButton.IsEnabled = ImportButton.IsEnabled = SaveButton.IsEnabled = true; }
+        finally { IsBusy = false; ExportButton.IsEnabled = ImportButton.IsEnabled = SaveButton.IsEnabled = ClearHistoryButton.IsEnabled = true; }
     }
     private async void OnExport(object sender, RoutedEventArgs e)
     {
@@ -121,11 +116,24 @@ public partial class SettingsWindow : Window
         try { Populate(new SettingsStore(dialog.FileName).Load() with { StartAtLogin = app.Settings.StartAtLogin }); Status.Text = "Review imported settings, then Save to apply. Login and history consent are unchanged."; }
         catch (Exception error) { Status.Text = error.Message; }
     }
-    private async void OnClearUnpinned(object sender, RoutedEventArgs e) => await Clear(false);
-    private async void OnClearAll(object sender, RoutedEventArgs e) => await Clear(true);
+    internal void ShowHistory() { SettingsTabs.SelectedItem = HistoryTab; CleanupAge.Focus(); }
+    private async void OnClearHistory(object sender, RoutedEventArgs e)
+    {
+        if (IsBusy) return;
+        int choice = CleanupAge.SelectedIndex;
+        if (choice >= 3) { await Clear(choice == 4); return; }
+        int days = choice == 0 ? 7 : choice == 1 ? 30 : 90;
+        DateTimeOffset cutoff = DateTimeOffset.UtcNow.AddDays(-days);
+        if (MessageBox.Show(this, $"Permanently delete unpinned copies older than {days} days (before {cutoff.ToLocalTime():g})?\n\nNewer copies, pinned entries, unsaved drafts, and your newest copy will be kept. This cannot be undone.", "Clear older history", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return;
+        await Work(async () =>
+        {
+            int count = await app.History.ClearOlderThan(cutoff, app.ProtectedDraftIds);
+            Status.Text = $"Removed {count:N0} older entries. Recent history, pins, and drafts were kept.";
+        });
+    }
     private async Task Clear(bool all)
     {
-        if (IsBusy || MessageBox.Show(this, all ? "Permanently delete all history, including pinned entries?" : "Permanently delete all unpinned history?", "Clear history", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+        if (IsBusy || MessageBox.Show(this, all ? "Permanently delete all history, including pinned entries? This cannot be undone." : "Permanently delete all unpinned history, including recent copies? This cannot be undone.", "Clear history", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return;
         await Work(async () => { if (!await app.ResolveDrafts(all)) { Status.Text = "Clear cancelled. Resolve drafts first."; return; } await app.History.Clear(all); app.HistoryCleared(); Status.Text = "History cleared. Original files were untouched."; });
     }
     private void OnOpenData(object sender, RoutedEventArgs e)

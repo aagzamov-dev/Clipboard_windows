@@ -8,14 +8,19 @@ Run `Clipboard.exe` from a complete extracted Windows package. Choose **Start lo
 
 Press **Ctrl+Alt+V** or click the tray icon to open beside the mouse, on the mouse’s monitor. The popup respects taskbars, negative monitor coordinates, and mixed DPI. Its list and preview sizes are remembered per monitor. Opening uses a 65 ms fade when system animations are enabled; dismissal is immediate.
 
-- Click an entry to paste into the previous app. Its **↗** button opens Preview; **⧉** copies without pasting.
-- Search and filter by type, pin, or date. Today is the default. Day arrows browse older dates; All history searches every day. History loads in pages of 100 with virtualized rows.
+- Click an entry to paste into the previous app. Its **Preview** button opens the editor; **Copy** copies without pasting. Hover the icons for names and shortcuts.
+- Turn on **Keep open** in the header to keep Clipboard above other apps while you work or paste. Turn it off to restore automatic dismissal; closing the picker resets the mode. Opening Settings or Clear history closes the picker and resets the mode too. Returning to the kept-open picker uses the previous app identified by Windows as its paste destination; an unavailable or invalid destination clears the target. Each row has its own **Pin/Unpin** button; highlighted pins indicate saved pinned entries and do not trigger paste.
+- The compact picker defaults to 440 × 520 DIP. Drag anywhere in its title area to move it; drag an edge to resize. Existing per-monitor sizes are kept. Image entries show thumbnails and a larger preview. Local PNG, JPEG, BMP, GIF, TIFF, and ICO file references can also be previewed without changing file Copy/Paste behavior. Image files on shares, redirected/linked paths, and unsupported locations stay as references. Previews are limited to 20 MB and 64 million source pixels; thumbnails decode to a 160-pixel edge and larger previews to 1024 pixels. Hidden or recycled rows cancel their pending previews.
+- Opening or closing Preview keeps the current window position. Growth is limited to the space remaining on that monitor; near an edge, Preview uses the compact single-pane layout. Temporary screen-edge fits do not replace your preferred list/preview sizes. New popup openings still appear beside the mouse.
+- Preview preserves the list's opening width, item widths, and visible height. Extra window space goes to Preview; a wider or taller list also sets the minimum requested preview window size. Screen limits can temporarily use the compact fallback or reduce visible height, without replacing the captured list size.
+- Search and filter by type, pin, or date. All history is the default. Day arrows browse older dates. History loads in pages of 100 with virtualized rows.
 - Edit text in Preview. **Save** updates history; Copy/Paste use the draft immediately. Text actions trim whitespace, remove blank lines, and change case.
 - Ctrl-click or Shift-click text entries to select several. Space opens their combined editable preview. Original entries stay unchanged; combined drafts are retained per selection until copied/reverted/discarded.
 - New captures wait behind **Refresh** while you browse or edit. New copies never overwrite your active draft or selection.
-- Pin important entries. Unpinned items expire after 30 days by default. Settings supports unlimited retention, a count limit, and daily/weekly cleanup. Pinned entries and unsaved drafts are protected.
+- History stays until you delete it, without automatic expiry or an item limit, including when older settings are imported. **Clear history** offers copies older than 7, 30, or 90 days, all unpinned history, or everything. Age-based cleanup preserves pinned entries, unsaved drafts, and the newest copy; it removes older copies, never the selected recent date range. Permanent cleanup requires confirmation.
 - The tray menu pauses recording manually or for 5, 15, or 60 minutes. Recording also suspends while Windows is locked.
 - Settings includes System/Light/Dark appearance, app exclusions, launch at login, backup/restore, and settings import/export.
+- Windows 11 acrylic, rounded corners, and native window shadows frame the popup and settings. Transparency follows Windows accessibility and transparency preferences; unsupported systems use a solid background.
 
 ## Shortcuts
 
@@ -62,6 +67,8 @@ dotnet run --project src/Clipboard.Windows
 # Or ARM64:
 ./Scripts/publish.ps1 -Runtime win-arm64
 ```
+
+On Windows, `check.ps1` also runs isolated WPF image-preview component checks. They use temporary sample history and hidden composition targets, never the live clipboard or visible app windows. Optional layout renders: `dotnet run --project tests/Clipboard.Windows.Tests -c Release -- --render .build/image-review`.
 
 No third-party UI framework or web view is used. SQLite is the only application package dependency. Core regression tests also run on macOS/Linux:
 

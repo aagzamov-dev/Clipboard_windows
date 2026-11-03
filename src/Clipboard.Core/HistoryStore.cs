@@ -171,13 +171,25 @@ public sealed class HistoryStore : IDisposable
         string protect = protectedList.Length == 0 ? "" : $"AND id NOT IN ({string.Join(',', protectedList.Select((_, i) => "$id" + i))})";
         for (int i = 0; i < protectedList.Length; i++) command.Parameters.AddWithValue("$id" + i, protectedList[i].ToString());
         command.CommandText = $"""
-            DELETE FROM entries WHERE (deleted_at < $grace OR (pinned=0 AND
-                (($date IS NOT NULL AND created < $date) OR rowid IN
-                (SELECT rowid FROM entries WHERE pinned=0 AND deleted IS NULL ORDER BY created DESC,rowid DESC LIMIT -1 OFFSET $count)))) {protect}
+            DELETE FROM entries WHERE deleted_at < $grace {protect}
             """;
         command.Parameters.AddWithValue("$grace", DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeMilliseconds());
-        command.Parameters.AddWithValue("$date", settings.RetentionDays is int days ? DateTimeOffset.UtcNow.AddDays(-days).ToUnixTimeMilliseconds() : DBNull.Value);
-        command.Parameters.AddWithValue("$count", settings.MaximumCount ?? int.MaxValue); command.ExecuteNonQuery(); transaction.Commit(); return true;
+        command.ExecuteNonQuery(); transaction.Commit(); return true;
+    });
+
+    public Task<int> ClearOlderThan(DateTimeOffset cutoff, IReadOnlyCollection<Guid>? protectedIds = null) => Run(() =>
+    {
+        var protectedList = protectedIds?.Distinct().ToArray() ?? [];
+        using var command = connection.CreateCommand();
+        string protect = protectedList.Length == 0 ? "" : $"AND id NOT IN ({string.Join(',', protectedList.Select((_, i) => "$id" + i))})";
+        command.CommandText = $"""
+            DELETE FROM entries WHERE pinned=0 AND deleted IS NULL AND created < $cutoff
+                AND rowid NOT IN (SELECT rowid FROM entries WHERE deleted IS NULL ORDER BY created DESC,rowid DESC LIMIT 1)
+                {protect}
+            """;
+        command.Parameters.AddWithValue("$cutoff", cutoff.ToUnixTimeMilliseconds());
+        for (int i = 0; i < protectedList.Length; i++) command.Parameters.AddWithValue("$id" + i, protectedList[i].ToString());
+        int count = command.ExecuteNonQuery(); if (count > 0) lastHash = null; return count;
     });
 
     public Task Clear(bool includePinned) => Run(() =>

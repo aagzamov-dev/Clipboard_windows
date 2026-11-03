@@ -3,24 +3,8 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              ShutdownMode="OnExplicitShutdown">
   <Application.Resources>
-    <Style x:Key="ControlColors" TargetType="Control">
-      <Setter Property="Background" Value="{DynamicResource Surface}"/>
-      <Setter Property="Foreground" Value="{DynamicResource Ink}"/>
-      <Setter Property="BorderBrush" Value="{DynamicResource Line}"/>
-    </Style>
-    <Style TargetType="Button" BasedOn="{StaticResource ControlColors}">
-      <Setter Property="Padding" Value="12,6" />
-      <Setter Property="MinHeight" Value="30" />
-    </Style>
-    <Style TargetType="TextBox" BasedOn="{StaticResource ControlColors}">
-      <Setter Property="Padding" Value="8,6" />
-      <Setter Property="VerticalContentAlignment" Value="Center" />
-    </Style>
-    <Style TargetType="ComboBox" BasedOn="{StaticResource ControlColors}"/>
-    <Style TargetType="ComboBoxItem" BasedOn="{StaticResource ControlColors}"/>
-    <Style TargetType="CheckBox" BasedOn="{StaticResource ControlColors}"/>
-    <Style TargetType="PasswordBox" BasedOn="{StaticResource ControlColors}"/>
-    <Style TargetType="TabControl" BasedOn="{StaticResource ControlColors}"/>
-    <Style TargetType="TabItem" BasedOn="{StaticResource ControlColors}"/>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="ModernControls.xaml"/></ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
   </Application.Resources>
 </Application>

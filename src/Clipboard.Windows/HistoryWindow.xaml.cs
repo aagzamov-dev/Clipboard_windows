@@ -3,10 +3,13 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
@@ -32,17 +35,26 @@ public partial class HistoryWindow : Window
     private Guid? undoToken;
     private IReadOnlyCollection<Guid> pendingClearDraftIds = [];
     private bool navigatingDay;
+    private CancellationTokenSource? previewWork;
+    private PopupSize? listPaneSize;
+    private PopupSize? listWindowSize;
     private IReadOnlyList<ItemSummary> rows = [];
     internal IReadOnlyCollection<Guid> DraftIds => draftStore.ProtectedIds;
     internal bool HasDrafts => draftStore.HasChanges;
     internal bool IsPasting { get; private set; }
     internal bool PreviewVisible => previewVisible;
+    internal bool KeepOpen => KeepOpenButton.IsChecked == true;
+    internal double MinimumPreviewWidth => (listWindowSize?.Width ?? Width) + 240 + 8;
+    internal PopupSize SizeForMode(PopupSize preferred) => previewVisible
+        ? new(Math.Max(preferred.Width, MinimumPreviewWidth), Math.Max(preferred.Height, listWindowSize?.Height ?? Height))
+        : preferred;
 
     public HistoryWindow()
     {
         InitializeComponent();
+        Native.WindowBackdrop.Attach(this);
+        SourceInitialized += (_, _) => HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook(OnWindowMessage);
         searchTimer.Tick += async (_, _) => { searchTimer.Stop(); offset = 0; await Load(); };
-        SizeChanged += (_, _) => { if (previewVisible) PreviewColumn.Width = new GridLength(Math.Min(408, ActualWidth * 0.45)); };
         ready = true; UpdateStatus();
     }
 
@@ -55,14 +67,14 @@ public partial class HistoryWindow : Window
         StartButton.Visibility = consent ? Visibility.Collapsed : Visibility.Visible;
         EmptyTitle.Text = consent ? "Nothing here yet" : "Your clipboard, kept on your PC";
         EmptyDescription.Text = consent ? "Copy something or change the filters." : "Start local history to save text, images, and file references. No accounts or cloud sync.";
-        ShortcutLabel.Text = $"{App.Settings.Shortcut} · {rows.Count} items";
+        ShortcutLabel.Text = $"{App.Settings.Shortcut}  ·  {rows.Count} items  ·  Saved until cleared";
     }
 
     internal async Task Open()
     {
         if (!previewVisible && !HasDrafts)
         {
-            dayOffset = 0; Dates.SelectedIndex = 0; offset = 0;
+            dayOffset = 0; Dates.SelectedIndex = 3; offset = 0;
         }
         int version = interactionVersion;
         long nextCutoff = await App.History.Cutoff(); if (!IsVisible || version != interactionVersion) return;
@@ -82,7 +94,7 @@ public partial class HistoryWindow : Window
     internal async Task Captured()
     {
         if (!IsVisible) return;
-        if (HasDrafts || previewVisible || offset > 0 || HistoryList.SelectedItems.Count > 0 || Search.Text.Length > 0 || dayOffset != 0 || Dates.SelectedIndex != 0)
+        if (HasDrafts || previewVisible || offset > 0 || HistoryList.SelectedItems.Count > 0 || Search.Text.Length > 0 || dayOffset != 0 || Dates.SelectedIndex != 3)
             RefreshButton.Visibility = Visibility.Visible;
         else { cutoff = await App.History.Cutoff(); await Load(); }
     }
@@ -154,17 +166,22 @@ public partial class HistoryWindow : Window
 
     private async Task PreviewSelection()
     {
+        previewWork?.Cancel(); previewWork?.Dispose(); previewWork = new CancellationTokenSource();
+        var cancellation = previewWork.Token;
         int version = ++selectionVersion;
         detail = null; combinedOriginal = null; combinedKey = null; combinedDraft = "";
         Editor.IsEnabled = false; SaveButton.IsEnabled = false; TextActions.IsEnabled = false; ImagePreview.Source = null;
+        Editor.Visibility = FilePreview.Visibility = ImagePreviewFrame.Visibility = TextToolbar.Visibility = PlainPasteButton.Visibility = Visibility.Collapsed;
+        PreviewPlaceholder.Text = "Select an entry to preview"; PreviewPlaceholder.Visibility = Visibility.Visible;
         SetEditor(""); FilePreview.Clear(); PreviewTitle.Text = "Preview"; PreviewMetadata.Text = "";
-        var selected = HistoryList.SelectedItems.Cast<ItemSummary>().OrderBy(row => Array.IndexOf(rows.ToArray(), row)).ToArray();
+        var selected = SelectedRows();
         if (selected.Length == 0) { detail = null; return; }
+        PreviewPlaceholder.Text = "Loading preview…";
         try
         {
             if (selected.Length > 1)
             {
-                if (selected.Any(s => s.Kind is ItemKind.Image or ItemKind.Files)) { ShowNotice("Select text entries to combine them."); return; }
+                if (selected.Any(s => s.Kind is ItemKind.Image or ItemKind.Files)) { PreviewPlaceholder.Text = "Select one image or file entry to preview, or select text entries to combine."; return; }
                 if (selected.Sum(s => s.ByteCount) > Limits.DraftBytes) throw new InvalidOperationException("Combined selection exceeds 8 MB.");
                 var texts = new List<string>();
                 foreach (var summary in selected)
@@ -190,20 +207,42 @@ public partial class HistoryWindow : Window
             {
                 SetEditor(drafts.GetValueOrDefault(value.Id, value.Text!)); ShowText(); SaveButton.IsEnabled = drafts.ContainsKey(value.Id);
             }
-            else if (value.Kind == ItemKind.Image)
-            {
-                Editor.Visibility = FilePreview.Visibility = Visibility.Collapsed; ImagePreview.Visibility = Visibility.Visible;
-                using var stream = new System.IO.MemoryStream(value.Image!);
-                var image = new BitmapImage(); image.BeginInit(); image.CacheOption = BitmapCacheOption.OnLoad; if (value.Height > value.Width) image.DecodePixelHeight = Math.Min(value.Height, 1024); else image.DecodePixelWidth = Math.Min(value.Width, 1024); image.StreamSource = stream; image.EndInit(); image.Freeze();
-                ImagePreview.Source = image; TextActions.IsEnabled = SaveButton.IsEnabled = false;
-            }
             else
             {
-                ImagePreview.Source = null; Editor.Visibility = ImagePreview.Visibility = Visibility.Collapsed; FilePreview.Visibility = Visibility.Visible;
-                FilePreview.Text = string.Join(Environment.NewLine, value.Files!); TextActions.IsEnabled = SaveButton.IsEnabled = false;
+                BitmapSource? image = null;
+                try { image = await ImageContent.Load(value, 1024, cancellation); }
+                catch (OperationCanceledException) { return; }
+                catch (Exception error)
+                {
+                    if (version != selectionVersion) return;
+                    ShowNotice($"Image preview unavailable: {error.Message}");
+                }
+                if (version != selectionVersion || cancellation.IsCancellationRequested) return;
+                if (image is not null)
+                {
+                    ImagePreview.Source = image; ImagePreviewFrame.Visibility = Visibility.Visible;
+                    ImagePreview.ToolTip = value.Kind == ItemKind.Files ? string.Join(Environment.NewLine, value.Files!) : null;
+                    if (value.Kind == ItemKind.Files)
+                    {
+                        PreviewTitle.Text = System.IO.Path.GetFileName(ImageContent.FilePath(value)) ?? "Image file";
+                        PreviewMetadata.Text = $"{value.Created.ToLocalTime():g} · File reference";
+                    }
+                    PreviewPlaceholder.Visibility = Visibility.Collapsed;
+                }
+                else if (value.Kind == ItemKind.Files)
+                {
+                    FilePreview.Visibility = Visibility.Visible; FilePreview.Text = string.Join(Environment.NewLine, value.Files!);
+                    PreviewPlaceholder.Visibility = Visibility.Collapsed;
+                }
+                else PreviewPlaceholder.Text = "This image could not be previewed.";
             }
         }
-        catch (Exception error) { ShowNotice(error.Message); }
+        catch (Exception error)
+        {
+            if (version != selectionVersion) return;
+            PreviewPlaceholder.Text = "This entry could not be previewed.";
+            ShowNotice(error.Message);
+        }
     }
 
     private void SetEditor(string value)
@@ -212,7 +251,9 @@ public partial class HistoryWindow : Window
     }
     private void ShowText()
     {
-        ImagePreview.Source = null; Editor.IsEnabled = true; Editor.Visibility = Visibility.Visible; ImagePreview.Visibility = FilePreview.Visibility = Visibility.Collapsed; TextActions.IsEnabled = true;
+        ImagePreview.Source = null; Editor.IsEnabled = true; Editor.Visibility = Visibility.Visible;
+        ImagePreviewFrame.Visibility = FilePreview.Visibility = PreviewPlaceholder.Visibility = Visibility.Collapsed;
+        TextToolbar.Visibility = PlainPasteButton.Visibility = Visibility.Visible; TextActions.IsEnabled = true;
     }
     private void OnEditorChanged(object sender, TextChangedEventArgs e)
     {
@@ -270,7 +311,7 @@ public partial class HistoryWindow : Window
     private async Task<ClipboardItem?> CurrentItem(bool usePreview = true)
     {
         var actionDrafts = new Dictionary<Guid, string>(drafts);
-        var selected = HistoryList.SelectedItems.Cast<ItemSummary>().OrderBy(row => Array.IndexOf(rows.ToArray(), row)).ToArray();
+        var selected = SelectedRows();
         if (selected.Length > 1)
         {
             if (selected.Any(row => row.Kind is ItemKind.Image or ItemKind.Files)) throw new InvalidOperationException("Select text entries to combine them.");
@@ -300,7 +341,7 @@ public partial class HistoryWindow : Window
             if (plain && !item.IsText) { ShowNotice("Plain-text paste is available for text entries."); return; }
             if (!IsVisible || version != interactionVersion || target != App.Paste.Target) return;
             deliberatePasteDismissal = true;
-            string status = await App.Paste.Paste(item, plain, Dismiss); App.Report(status);
+            string status = await App.Paste.Paste(item, plain, DismissForPaste); App.Report(status);
         }
         catch (Exception error) { App.Report(error.Message); }
         finally { IsPasting = false; deliberatePasteDismissal = false; }
@@ -317,20 +358,41 @@ public partial class HistoryWindow : Window
     private async void OnPreviewRow(object sender, RoutedEventArgs e)
     {
         e.Handled = true; Guid id = (Guid)((Button)sender).Tag;
-        HistoryList.SelectedItem = rows.FirstOrDefault(row => row.Id == id); await SetPreview(true); await PreviewSelection(); if (Editor.Visibility == Visibility.Visible) { Editor.Focus(); Editor.CaretIndex = Editor.Text.Length; }
+        ++interactionVersion;
+        bool previous = restoringSelection; restoringSelection = true;
+        try { HistoryList.SelectedItem = rows.FirstOrDefault(row => row.Id == id); }
+        finally { restoringSelection = previous; }
+        await SetPreview(true); await PreviewSelection(); if (Editor.Visibility == Visibility.Visible) { Editor.Focus(); Editor.CaretIndex = Editor.Text.Length; }
     }
     private async void OnRowClick(object sender, MouseButtonEventArgs e)
     {
         if (Keyboard.Modifiers != ModifierKeys.None || IsPasting) return;
-        DependencyObject? source = e.OriginalSource as DependencyObject;
+        if (ClickedHistoryRow(e.OriginalSource as DependencyObject) is not null && HistoryList.SelectedItems.Count == 1) await Paste(false, false);
+    }
+    private static ListBoxItem? ClickedHistoryRow(DependencyObject? source)
+    {
         while (source is not null && source is not ListBoxItem)
         {
-            if (source is Button or System.Windows.Controls.Primitives.ScrollBar) return;
+            if (source is ButtonBase or ScrollBar) return null;
             source = VisualTreeHelper.GetParent(source);
         }
-        if (source is ListBoxItem && HistoryList.SelectedItems.Count == 1) await Paste(false, false);
+        return source as ListBoxItem;
     }
     private void OnListTyping(object sender, TextCompositionEventArgs e) { if (e.Text.Length == 0) return; Search.Focus(); Search.Text += e.Text; Search.CaretIndex = Search.Text.Length; e.Handled = true; }
+    private async void OnPinRow(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        await PinRow((ToggleButton)sender);
+    }
+    private async Task PinRow(ToggleButton button)
+    {
+        bool pinned = button.IsChecked == true;
+        Guid id = (Guid)button.Tag;
+        button.IsEnabled = false;
+        try { await App.History.Pin(id, pinned); await Load(); }
+        catch (Exception error) { if (button.Tag is Guid current && current == id) button.SetCurrentValue(ToggleButton.IsCheckedProperty, !pinned); ShowNotice(error.Message); }
+        finally { button.IsEnabled = true; }
+    }
     private async void OnPin(object sender, RoutedEventArgs e) => await Pin();
     private async Task Pin()
     {
@@ -354,25 +416,76 @@ public partial class HistoryWindow : Window
         try { if (undoToken is Guid token) await App.History.Undo(token); undoToken = null; UndoButton.Visibility = Visibility.Collapsed; await Load(); }
         catch (Exception error) { ShowNotice(error.Message); }
     }
-    private async Task SetPreview(bool visible)
+    private Task SetPreview(bool visible)
     {
-        App.RememberPopupSize(); previewVisible = visible; PreviewPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed; PreviewColumn.Width = new GridLength(visible ? 408 : 0);
-        if (!visible) { ++selectionVersion; ImagePreview.Source = null; detail = null; }
-        App.ResizePopup(visible ? 972 : 540, ActualHeight);
-        await Task.CompletedTask;
+        if (previewVisible == visible) return Task.CompletedTask;
+        if (visible)
+        {
+            listPaneSize = new PopupSize(Math.Max(1, HistoryPanel.ActualWidth), Math.Max(1, HistoryPanel.ActualHeight));
+            listWindowSize = new PopupSize(ActualWidth > 0 ? ActualWidth : Width, ActualHeight > 0 ? ActualHeight : Height);
+        }
+        App.RememberPopupSize(); previewVisible = visible; PreviewPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (!visible) { listPaneSize = listWindowSize = null; ++selectionVersion; previewWork?.Cancel(); ImagePreview.Source = null; detail = null; }
+        var resized = App.ResizePopup();
+        if (resized is not null && listWindowSize is { } outer && listPaneSize is { } pane)
+            LayoutPreviewForWidth(resized.Width - Math.Max(0, outer.Width - pane.Width));
+        else LayoutPreview();
+        return Task.CompletedTask;
     }
+    private ItemSummary[] SelectedRows()
+    {
+        var ids = HistoryList.SelectedItems.Cast<ItemSummary>().Select(row => row.Id).ToHashSet();
+        return rows.Where(row => ids.Contains(row.Id)).ToArray();
+    }
+    private void LayoutPreview() => LayoutPreviewForWidth(ContentGrid.ActualWidth);
+    private void LayoutPreviewForWidth(double availableWidth)
+    {
+        double listWidth = listPaneSize?.Width ?? 414;
+        // Fix the list's dimensions; all additional window space belongs to the preview.
+        bool singlePane = previewVisible && availableWidth + 0.5 < listWidth + 8 + 240;
+        HistoryPanel.Visibility = singlePane ? Visibility.Collapsed : Visibility.Visible;
+        HistoryColumn.Width = singlePane ? new GridLength(0) : previewVisible ? new GridLength(listWidth) : new GridLength(1, GridUnitType.Star);
+        HistoryPanel.Height = previewVisible && listPaneSize is { } size ? Math.Min(size.Height, ContentGrid.ActualHeight) : double.NaN;
+        HistoryPanel.VerticalAlignment = previewVisible ? VerticalAlignment.Top : VerticalAlignment.Stretch;
+        PreviewColumn.Width = previewVisible ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
+        PreviewPanel.Margin = new Thickness(previewVisible && !singlePane ? 8 : 0, 0, 0, 0);
+    }
+    private void OnContentSizeChanged(object sender, SizeChangedEventArgs e) => LayoutPreview();
     private async void OnClosePreview(object sender, RoutedEventArgs e) => await SetPreview(false);
     internal void DiscardDrafts()
     {
         draftStore.Remove(pendingClearDraftIds); pendingClearDraftIds = []; combinedOriginal = null; combinedDraft = ""; combinedKey = null; detail = null;
         SetEditor(""); HistoryList.ItemsSource = null; rows = []; ImagePreview.Source = null; UpdateStatus();
     }
-    internal void Dismiss() { ++interactionVersion; BeginAnimation(OpacityProperty, null); Opacity = 1; Hide(); App.RememberPopupSize(); ImagePreview.Source = null; if (detail?.Kind == ItemKind.Image) detail = null; searchTimer.Stop(); ++loadVersion; ++selectionVersion; }
-    private void OnDeactivated(object? sender, EventArgs e) { if (!deliberatePasteDismissal) { App.Paste.Cancel(); Dismiss(); } }
+    private void DismissForPaste() { if (!KeepOpen) Dismiss(); }
+    internal void Dismiss() { KeepOpenButton.IsChecked = false; UpdateKeepOpen(); ++interactionVersion; BeginAnimation(OpacityProperty, null); Opacity = 1; Hide(); App.RememberPopupSize(); previewWork?.Cancel(); ImagePreview.Source = null; if (detail?.Kind == ItemKind.Image) detail = null; searchTimer.Stop(); ++loadVersion; ++selectionVersion; }
+    private void OnKeepOpen(object sender, RoutedEventArgs e) => UpdateKeepOpen();
+    private void UpdateKeepOpen()
+    {
+        KeepOpenButton.ToolTip = KeepOpen ? "Keep open is on. Click to turn off." : "Keep Clipboard open above other apps";
+        System.Windows.Automation.AutomationProperties.SetName(KeepOpenButton, KeepOpen ? "Turn off keep open" : "Keep Clipboard open above other apps");
+    }
+    private nint OnWindowMessage(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
+    {
+        if (message == 0x0006 && ((long)wParam & 0xffff) is 1 or 2 && KeepOpen) RememberActivation(lParam);
+        return 0;
+    }
+    private void RememberActivation(nint previous)
+    {
+        ++interactionVersion;
+        App.RememberPasteDestination(previous);
+    }
+    private void OnDeactivated(object? sender, EventArgs e)
+    {
+        if (deliberatePasteDismissal) return;
+        App.Paste?.Cancel();
+        if (KeepOpen) ++interactionVersion; else Dismiss();
+    }
     private void OnVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e) { if (IsVisible && previewVisible) _ = PreviewSelection(); }
     protected override void OnClosing(CancelEventArgs e) { e.Cancel = true; Dismiss(); }
-    private void OnHeaderDrag(object sender, MouseButtonEventArgs e) { if (e.OriginalSource is TextBlock && e.LeftButton == MouseButtonState.Pressed) DragMove(); }
     private void OnSettings(object sender, RoutedEventArgs e) => App.ShowSettings();
+    private void OnClearHistory(object sender, RoutedEventArgs e) => App.ShowSettings(true);
+    private void OnDismiss(object sender, RoutedEventArgs e) => Dismiss();
     private async void OnRecording(object sender, RoutedEventArgs e) { await App.Guard(App.ToggleRecording); UpdateStatus(); }
 
     private async void OnKeyDown(object sender, KeyEventArgs e)

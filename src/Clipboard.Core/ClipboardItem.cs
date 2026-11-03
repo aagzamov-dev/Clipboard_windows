@@ -100,7 +100,10 @@ public sealed record ClipboardItem
 
 public sealed record ItemSummary(Guid Id, ItemKind Kind, string Preview, DateTimeOffset Created, string Source, bool Pinned, long ByteCount)
 {
-    public string KindLabel => Pinned ? $"● {Kind}" : Kind.ToString();
+    public string KindLabel => Pinned ? $"Pinned · {Kind}" : Kind.ToString();
+    public string SourceLabel => string.IsNullOrWhiteSpace(Source) ? "Unknown app" : Source.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? Source[..^4] : Source;
+    public string TimeLabel => Created.ToLocalTime().Date == DateTime.Today ? Created.ToLocalTime().ToString("HH:mm") : Created.ToLocalTime().ToString("MMM d, HH:mm");
+    public string ListMetadata => $"{KindLabel}  ·  {SourceLabel}  ·  {TimeLabel}";
     public string Metadata => $"{Created.ToLocalTime():g}  ·  {Source}  ·  {ByteCount:N0} bytes";
 }
 

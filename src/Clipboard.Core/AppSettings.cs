@@ -40,7 +40,8 @@ public sealed record AppSettings
     public bool ActiveDisplay { get; init; } = false;
     public bool OnboardingComplete { get; init; }
     public bool StartMonitoring { get; init; } = true;
-    public int? RetentionDays { get; init; } = 30;
+    // Retained for compatibility with existing settings imports; active history never expires.
+    public int? RetentionDays { get; init; }
     public int? MaximumCount { get; init; }
     public bool WeeklyCleanup { get; init; }
     public DateTimeOffset? LastCleanup { get; init; }
